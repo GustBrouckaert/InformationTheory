@@ -37,7 +37,137 @@ class RSCode:
         assert np.shape(code)[1] == self.l+self.n-self.k , 'the number of columns must be equal to self.l+self.n-self.k'
         assert type(code) is galois.GF(2**self.m) , 'each element of code  must be a galois.GF element'
 
-        #insert your code here
+        GF = galois.GF(2**self.m)
+        alpha = GF.primitive_element
+        n_sym = self.n - self.k
+        n_short = self.l + n_sym
+        n_pad = self.n - n_short
+
+        def poly_eval_asc(coeffs, x):
+            # Evaluate polynomial with ascending coefficients: c0 + c1*x + ...
+            y = GF(0)
+            x_pow = GF(1)
+            for c in coeffs:
+                y += c * x_pow
+                x_pow *= x
+            return y
+
+        def compute_syndromes(r_full):
+            synd = GF.Zeros(n_sym)
+            for j in range(n_sym):
+                root = alpha ** (self.m0 + j)
+                acc = GF(0)
+                for idx, val in enumerate(r_full):
+                    acc += val * (root ** (self.n - 1 - idx))
+                synd[j] = acc
+            return synd
+
+        def berlekamp_massey(synd):
+            C = GF.Zeros(n_sym + 1)
+            B = GF.Zeros(n_sym + 1)
+            C[0] = GF(1)
+            B[0] = GF(1)
+            L = 0
+            m = 1
+            b = GF(1)
+
+            for n_idx in range(n_sym):
+                d = synd[n_idx]
+                for i in range(1, L + 1):
+                    d += C[i] * synd[n_idx - i]
+
+                if d == 0:
+                    m += 1
+                    continue
+
+                T = C.copy()
+                coef = d / b
+                for i in range(0, n_sym + 1 - m):
+                    C[i + m] -= coef * B[i]
+
+                if 2 * L <= n_idx:
+                    L = n_idx + 1 - L
+                    B = T
+                    b = d
+                    m = 1
+                else:
+                    m += 1
+
+            return C, L
+
+        n_rows = np.shape(code)[0]
+        decoded = GF.Zeros((n_rows, self.l))
+        nERR = np.zeros(n_rows, dtype=int)
+
+        for r in range(n_rows):
+            r_short = GF(code[r, :])
+            r_full = np.concatenate((GF.Zeros(n_pad), r_short))
+
+            synd = compute_syndromes(r_full)
+            if np.all(synd == 0):
+                corrected_short = r_full[n_pad:]
+                decoded[r, :] = corrected_short[:self.l]
+                nERR[r] = 0
+                continue
+
+            Lambda, L = berlekamp_massey(synd)
+            if L == 0 or L > self.t:
+                decoded[r, :] = r_short[:self.l]
+                nERR[r] = -1
+                continue
+
+            # Chien search: find positions i (from right, i=0 is x^0 term) s.t. Lambda(alpha^-i)=0.
+            err_locs = []
+            for i in range(self.n):
+                if poly_eval_asc(Lambda[:L + 1], alpha ** (-i)) == 0:
+                    err_locs.append(i)
+
+            if len(err_locs) != L or len(err_locs) > self.t:
+                decoded[r, :] = r_short[:self.l]
+                nERR[r] = -1
+                continue
+
+            # Error evaluator Omega(x) = (S(x) * Lambda(x)) mod x^(n-k)
+            omega = GF.Zeros(n_sym)
+            for i in range(n_sym):
+                for j in range(min(i, L) + 1):
+                    omega[i] += synd[i - j] * Lambda[j]
+
+            # Formal derivative Lambda'(x)
+            Lambda_deriv = GF.Zeros(max(L, 1))
+            for i in range(1, L + 1):
+                if i % 2 == 1:
+                    Lambda_deriv[i - 1] = Lambda[i]
+
+            r_corr = r_full.copy()
+            decode_failed = False
+            for i in err_locs:
+                x_inv = alpha ** (-i)
+                Xi = alpha ** i
+                num = poly_eval_asc(omega, x_inv)
+                den = poly_eval_asc(Lambda_deriv, x_inv)
+                if den == 0:
+                    decode_failed = True
+                    break
+
+                # Forney for consecutive roots alpha^m0 .. alpha^(m0+n-k-1)
+                err = (Xi ** (1 - self.m0)) * num / den
+                arr_idx = self.n - 1 - i
+                r_corr[arr_idx] -= err
+
+            if decode_failed:
+                decoded[r, :] = r_short[:self.l]
+                nERR[r] = -1
+                continue
+
+            if not np.all(compute_syndromes(r_corr) == 0):
+                decoded[r, :] = r_short[:self.l]
+                nERR[r] = -1
+                continue
+
+            corrected_short = r_corr[n_pad:]
+            decoded[r, :] = corrected_short[:self.l]
+            nERR[r] = len(err_locs)
 
         assert np.shape(decoded)[1] == self.l, 'the number of columns must be equal to self.l'
         assert type(decoded) is galois.GF(2**self.m) , 'each element of decoded  must be a galois.GF element'
