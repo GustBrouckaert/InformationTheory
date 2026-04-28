@@ -74,7 +74,8 @@ class RSCode:
             for n_idx in range(n_sym):
                 d = synd[n_idx]
                 for i in range(1, L + 1):
-                    d += C[i] * synd[n_idx - i]
+                    if n_idx - i >= 0:
+                        d += C[i] * synd[n_idx - i]
 
                 if d == 0:
                     m += 1
@@ -118,7 +119,7 @@ class RSCode:
 
             # Chien search: find positions i (from right, i=0 is x^0 term) s.t. Lambda(alpha^-i)=0.
             err_locs = []
-            for i in range(self.n):
+            for i in range(n_short):
                 if poly_eval_asc(Lambda[:L + 1], alpha ** (-i)) == 0:
                     err_locs.append(i)
 
@@ -147,11 +148,14 @@ class RSCode:
                 num = poly_eval_asc(omega, x_inv)
                 den = poly_eval_asc(Lambda_deriv, x_inv)
                 if den == 0:
+                    # In characteristic-2 fields, Lambda'(x) can be identically zero (e.g., repeated roots),
+                    # which makes Forney's denominator vanish and decoding with errors-only must fail.
                     decode_failed = True
                     break
 
                 # Forney for consecutive roots alpha^m0 .. alpha^(m0+n-k-1)
                 err = (Xi ** (1 - self.m0)) * num / den
+                # Descending convention: position x^i maps to r_full index (self.n - 1 - i).
                 arr_idx = self.n - 1 - i
                 r_corr[arr_idx] -= err
 
