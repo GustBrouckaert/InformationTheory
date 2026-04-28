@@ -275,3 +275,7 @@ class RSCode:
         print(nERR)
         assert (decoded[0:4, :] == msg[0:4, :]).all()
         pass
+
+
+if __name__ == "__main__":
+    RSCode.test()
