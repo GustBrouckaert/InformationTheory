@@ -59,12 +59,12 @@ where `alpha` is a primitive element of `GF(2^m)`.
 
 ```mermaid
 flowchart LR
-  A[Start generator = 1] --> B[i = 0]
-  B --> C[Multiply by (x - α^(m0+i))]
-  C --> D{i < 2t-1?}
-  D -->|yes| E[i = i+1]
+  A[Start with generator 1] --> B[Set i to 0]
+  B --> C[Multiply by factor x minus alpha power m0 plus i]
+  C --> D{Is i less than 2t minus 1}
+  D -->|yes| E[Increase i by 1]
   E --> C
-  D -->|no| F[Return g(x)]
+  D -->|no| F[Return generator g of x]
 ```
 
 ---
@@ -111,14 +111,14 @@ For each message row:
 
 ```mermaid
 flowchart LR
-  A[msg row: l symbols] --> B[prepend k-l zeros]
-  B --> C[M(x)]
-  C --> D[multiply by x^(n-k)]
-  D --> E[remainder R(x) mod g(x)]
-  E --> F[C(x) = shifted + remainder]
-  F --> G[coeffs length n]
-  G --> H[drop first k-l symbols]
-  H --> I[shortened codeword length l + (n-k)]
+  A[Message row with l symbols] --> B[Prepend k minus l zeros]
+  B --> C[Build message polynomial M of x]
+  C --> D[Shift by multiplying with x power n minus k]
+  D --> E[Compute remainder R of x modulo g of x]
+  E --> F[Build C of x as shifted polynomial plus remainder]
+  F --> G[Convert to coefficient vector of length n]
+  G --> H[Drop first k minus l symbols]
+  H --> I[Output shortened codeword length l plus n minus k]
 ```
 
 ---
