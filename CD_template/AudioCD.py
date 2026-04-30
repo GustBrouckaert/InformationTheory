@@ -7,7 +7,7 @@ from playsound import playsound
 from reedsolo import RSCodec
 
 class AudioCD:
-
+    
     def __init__(self, Fs,configuration,max_interpolation):
         self.Fs=Fs # Sample rate of the audio
         self.max_interpolation=max_interpolation # The maximum number of interpolated audio samples
@@ -17,6 +17,7 @@ class AudioCD:
         self.cd_bits=[] #Bits written to disk (before EFM)
         self.cd_bits_original=[]
         self.scaled_quantized_padded_original=[] #Reference to compare the output of readCD to
+        self.D = 4
 
 
         # initialise encoders/decoders
@@ -120,8 +121,12 @@ class AudioCD:
         # Add uniform bit errors to cd
         # Input:
         #  -p: the bit error probability, i.e., a self.cd_bits bit is flipped with probability p
-        noise = np.random.rand(self.cd_bits.size) < p
-        self.cd_bits = np.bitwise_xor(self.cd_bits, noise.astype(int))
+        
+        
+        noise = np.random.rand((self.cd_bits).shape)<p
+        self.cd_bits = np.bitwise_xor(self.cd_bits,noise.astype(int))
+        # noise = np.random.rand(self.cd_bits.size) < p
+        # self.cd_bits = np.bitwise_xor(self.cd_bits, noise.astype(int))
         return
 
     def scratchCd(self,length_scratch,location_scratch):
@@ -244,10 +249,27 @@ class AudioCD:
         #  -output: the output of this block of the CIRC encoder (1D numpy array)
         #  -n_frames: the length of the output expressed in frames (changed from input because of delay!)
         assert len(np.shape(input))==1 and type(input) is np.ndarray, 'input must be a 1D numpy array'
+        #Only half the colums need to be delayed
+        delay_cols = np.array([0,1,2,3, 8,9,10,11, 16,17,18,19])
+        no_delay_cols = np.array([4,5,6,7, 12,13,14,15, 20,21,22,23])
+        delayed = np.zeros((n_frames + 2, 24), dtype='B')
+        input = input.reshape(n_frames, 24)
+        delayed[:n_frames, no_delay_cols] = input[:, no_delay_cols]
+        delayed[2:n_frames+2, delay_cols] = input[:, delay_cols]
 
-        output = input[48:]
-        n_frames -= 2
+        #switching colums according to scheme p45 of standard ECMA-130
+        perm = np.array([
+            0, 1, 8, 9,
+            16, 17, 2, 3,
+            10, 11, 18, 19,
+            4, 5, 12, 13,
+            20, 21, 6, 7,
+            14, 15, 22, 23
+        ])
 
+        output = delayed[:, perm].reshape(-1)
+
+        n_frames += 2
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         return (output,n_frames)
 
@@ -264,10 +286,13 @@ class AudioCD:
 
         input = input.astype('B')
         output = np.zeros(28 * int(n_frames), dtype='B')
-        for i in range(int(n_frames)):
+        for i in range(n_frames):
             encoded = self.rsc2.encode(input[i*24:(i+1)*24])
-            encoded = np.array(list(encoded), dtype='B')
-            output[i*28:(i+1)*28] = encoded[-28:]
+            encoded = np.array(list(encoded), dtype='B') #TODO maybe we need all the encoded bits, not just the parity
+            parity_bits = encoded[-4:]  # Take the last 4 symbols (parity)
+            output[i*28:(i)*28+12] = encoded[:12]
+            output[i*28+12:(i)*28+16] = parity_bits  # Parity bits, we put them in the middle of the frame according to the standard
+            output[i*28+16:(i+1)*28] = encoded[12:24]
 
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         return (output,n_frames)
@@ -281,9 +306,16 @@ class AudioCD:
         #  -output: the output of this block of the CIRC encoder (1D numpy array)
         #  -n_frames: the length of the output expressed in frames (changed from input because of delay!)
         assert len(np.shape(input))==1 and type(input) is np.ndarray, 'input must be a 1D numpy array'
+        input = input.reshape(n_frames, 28)
+        n_cols = 28
+        max_delay = (n_cols-1) * self.D
+        output = np.zeros((n_frames + max_delay, n_cols), dtype='B')
+        for j in range(n_cols):
+            delay = j * self.D
+            output[delay:delay + n_frames, j] = input[:, j]
 
-        output = input[27*28:]
-        n_frames -= 27
+        output = output.reshape(-1)
+        n_frames = n_frames + max_delay
 
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         return (output,n_frames)
@@ -299,11 +331,11 @@ class AudioCD:
         assert len(np.shape(input))==1 and type(input) is np.ndarray, 'input must be a 1D numpy array'
 
         input = input.astype('B')
-        output = np.zeros(32 * int(n_frames), dtype='B')
-        for i in range(int(n_frames)):
+        output = np.zeros(32 * n_frames, dtype='B')
+        for i in range(n_frames):
             encoded = self.rsc1.encode(input[i*28:(i+1)*28])
             encoded = np.array(list(encoded), dtype='B')
-            output[i*32:(i+1)*32] = encoded[-32:]
+            output[i*32:(i+1)*32] = encoded
 
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         return (output,n_frames)
@@ -317,12 +349,22 @@ class AudioCD:
         #  -output: the output of this block of the CIRC encoder (1D numpy array)
         #  -n_frames: the length of the output expressed in frames (changed from input because of delay!)
         assert len(np.shape(input))==1 and type(input) is np.ndarray, 'input must be a 1D numpy array'
+        input = input.reshape(n_frames, 32)
+        output = np.zeros((n_frames + 1, 32), dtype='B')
+        for j in range(32):
+            if j in range(12, 16) or j in range(28, 32):
+                input[:, j] = np.invert(input[:, j]) # inverting the parity bits according to the standard, we do it before the delays because it is simpler
+            
+            if j % 2 == 0:
+                output[1:n_frames + 1, j] = input[:, j]
 
-        output = input[32:]
-        n_frames -= 1
-        for i in range(n_frames):
-            output[i*32 + 28 : (i+1)*32] = (~output[i*32 + 28 : (i+1)*32]) & 0xFF
+            else:
+                output[0:n_frames, j] = input[:, j]
+            
 
+
+        n_frames += 1
+        output = output.reshape(-1)
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         return (output,n_frames)
 
@@ -335,7 +377,7 @@ class AudioCD:
         #  -output: the output of this block of the CIRC decoder (1D numpy array)
         #  -n_frames:  the length of the output expressed in frames (changed from input because of delay!)
         assert len(np.shape(input))==1 and type(input) is np.ndarray, 'input must be a 1D numpy array'
-
+        
         n_frames = int(n_frames)
         output = np.concatenate((np.zeros(32, dtype=input.dtype), input))
         n_frames += 1
@@ -620,17 +662,19 @@ class AudioCD:
         if not typ:
             raise ValueError("sample width {} not supported".format(depth))
 
-        data = np.fromstring(sdata, dtype=typ)
+        data = np.frombuffer(sdata, dtype=typ)
         data=data/(2**15)
         ch_1 = data[0::nch]
         ch_2 = data[1::nch]
         audiofile=np.transpose(np.vstack((ch_1,ch_2)))
+        #cd = AudioCD(Fs,1,8)
         cd = AudioCD(Fs,1,8)
+        #cd = AudioCD(Fs,0,8) # 0 for no CIRC, 1 for CIRC as described in standard, 2 for concatenated RS, no interleaving, 3 for single 32,24 RS
         cd.writeCd(audiofile)
         T_scratch = 600000 # Scratch at a diameter of approx. 66 mm
         l_scratch = 3000
-        for i  in range(math.floor((cd.cd_bits).size/T_scratch)):
-            cd.scratchCd(l_scratch,30000+(i)*T_scratch)
+        #for i  in range(math.floor((cd.cd_bits).size/T_scratch)):
+            #cd.scratchCd(l_scratch,30000+(i)*T_scratch)
 
         [out,interpolation_flags] = cd.readCd()
         cd.save_and_play_music(out[:,0],out[:,1],'test.wav',0)
@@ -643,3 +687,26 @@ class AudioCD:
         print(f'Number undetected errors: {np.sum(out[interpolation_flags==0] != cd.scaled_quantized_padded_original[interpolation_flags==0])}')
 
         pass
+
+
+
+
+# import numpy as np
+
+# # create fake data (multiple frames of 32 bytes)
+# n_frames = 10
+# input_data = np.random.randint(0, 256, size=32*n_frames, dtype=np.uint8)
+
+# cd = AudioCD(Fs=44100, configuration=1, max_interpolation=8)
+
+# # run encode → decode
+# enc, nf_enc = cd.CIRC_enc_delay_inv(input_data.copy(), n_frames)
+# dec, nf_dec = cd.CIRC_dec_delay_inv(enc.copy(), nf_enc)
+
+# # compare (align sizes!)
+# min_len = min(len(input_data), len(dec))
+# print("Equal:", np.array_equal(input_data[:min_len], dec[:min_len]))
+
+# # optional: inspect difference
+# diff = np.where(input_data[:min_len] != dec[:min_len])[0]
+# print("Number of mismatches:", len(diff))
