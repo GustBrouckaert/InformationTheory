@@ -1,6 +1,7 @@
 import copy
 import math
 import struct
+import sys
 import wave
 import numpy as np
 from playsound import playsound
@@ -17,7 +18,7 @@ class AudioCD:
         self.cd_bits=[] #Bits written to disk (before EFM)
         self.cd_bits_original=[]
         self.scaled_quantized_padded_original=[] #Reference to compare the output of readCD to
-        self.D = 4
+        self.D = 4 # TODO test different values
 
 
         # initialise encoders/decoders
@@ -288,7 +289,7 @@ class AudioCD:
         output = np.zeros(28 * int(n_frames), dtype='B')
         for i in range(n_frames):
             encoded = self.rsc2.encode(input[i*24:(i+1)*24])
-            encoded = np.array(list(encoded), dtype='B') #TODO maybe we need all the encoded bits, not just the parity
+            encoded = np.array(list(encoded), dtype='B') 
             parity_bits = encoded[-4:]  # Take the last 4 symbols (parity)
             output[i*28:(i)*28+12] = encoded[:12]
             output[i*28+12:(i)*28+16] = parity_bits  # Parity bits, we put them in the middle of the frame according to the standard
@@ -364,7 +365,7 @@ class AudioCD:
 
 
         n_frames += 1
-        print(f"n_frames: {n_frames}")
+        #print(f"n_frames: {n_frames}")
         output = output.reshape(-1)
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         return (output,n_frames)
@@ -390,10 +391,11 @@ class AudioCD:
         # We delay odd colums now, effect after encoding and decoding is the original but delayed by 1 frame
         output[0:n_frames, even_cols] = input[:, even_cols]
         output[1:n_frames+1, odd_cols] = input[:, odd_cols]
-        invert_cols = list(range(12, 16)) + list(range(28, 32)) # note: in the first and last frame (2 extra frames caused by the delay, we have mostly zeroes but also 4 255 bytes, this is not an issue because we will chop the eddges off at the end)
+        invert_cols = list(range(12, 16)) + list(range(28, 32)) # note: in the first and last frame (2 extra frames caused by the delay, we have mostly zeroes but also 4 255 bytes, this is not an issue because we chop the edges off)
         output[:, invert_cols] = np.invert(output[:, invert_cols])
+        output = output[1:-1, :] #chop edges off
         output = output.reshape(-1)
-        n_frames += 1
+        n_frames -= 1
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         return (output,n_frames)
 
@@ -407,8 +409,9 @@ class AudioCD:
         #  -erasure_flags_out: the erasure flags at the output of this block, follow the decoding algorithm from the assignment (1D numpy array)
         #  -n_frames: the length of the output expressed in frames
         assert len(np.shape(input))==1 and type(input) is np.ndarray, 'input must be a 1D numpy array'
-
+        n_frames = int(n_frames)
         input = input.astype('B')
+        #print(f"n_frames before decoding C1: {n_frames}")
         output = np.zeros(n_frames * 28, dtype='B')
         erasure_flags_out = np.zeros(n_frames * 28, dtype=int)
 
@@ -416,7 +419,13 @@ class AudioCD:
             block = input[i*32:(i+1)*32]
 
             try:
+                # print(f"block before decoding C1: {block}")
                 decoded, _, err = self.rsc1.decode(block, erase_pos=None)
+                test_decode, _, test_err = self.rsc1.decode(block, erase_pos= []) 
+                # print(f"block after decoding C1: {decoded}")
+                # print(f"test_decode: {test_decode}")
+                # print(f"Are they equal? {test_decode == decoded}")
+                # print(f"Are errors equal? {err == test_err}")
                 ERR = len(err)
 
                 decoded_list = list(decoded)[-28:]
@@ -463,9 +472,18 @@ class AudioCD:
             output[delay:delay + n_frames, j] = input[:, j]
             erasure_flags_out[delay:delay + n_frames, j] = erasure_flags_in[:, j]
 
+        #print(f"output before chopping: {output}")
+        if max_delay > 0:
+            output = output[max_delay:-max_delay, :] #chop edges off if there is delay
+            erasure_flags_out = erasure_flags_out[max_delay:-max_delay, :]
+        else:
+            output = output[:, :] # if self.D is 0, there is no delay and we can just take the whole output
+            erasure_flags_out = erasure_flags_out[:, :]
+        
+        #print(f"output: {output}")
         output = output.reshape(-1)
-        n_frames = n_frames + max_delay
-        erasure_flags_out = erasure_flags_out.reshape(-1)
+        erasure_flags_out = erasure_flags_out.reshape(-1) #chop edges off and reshape
+        n_frames = n_frames - max_delay
       
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         assert len(np.shape(erasure_flags_out))==1 and type(erasure_flags_out) is np.ndarray, 'erasure_flags_out must be a 1D numpy array'
@@ -485,46 +503,68 @@ class AudioCD:
         assert len(np.shape(erasure_flags_in))==1 and type(erasure_flags_in) is np.ndarray, 'erasure_flags_in must be a 1D numpy array'
 
         input = input.astype('B')
-        output = np.zeros(24 * int(n_frames), dtype='B')
-        erasure_flags_out = np.zeros(24 * int(n_frames), dtype=int)
-        for i in range(int(n_frames)):
-            erase_pos = np.where(erasure_flags_in[i*28:(i+1)*28] == 1)[0]
-            f = len(erase_pos)  # Number of erasure flags at input of C2 decoder
-            
+        output = np.zeros(n_frames * 24, dtype='B')
+        erasure_flags_out = np.zeros(n_frames * 24, dtype=int)
+
+        for i in range(n_frames):
+            block = input[i*28:(i+1)*28]
+            #print(f"block: {block}")
+            flags = erasure_flags_in[i*28:(i+1)*28]
+
+            # --- Rebuild RS word ---
+            rs_block = np.zeros(28, dtype='B')
+            rs_block[:12] = block[:12]
+            rs_block[12:24] = block[16:28]
+            rs_block[24:28] = block[12:16]
+
+            rs_flags = np.zeros(28, dtype=int)
+            rs_flags[:12] = flags[:12]
+            rs_flags[12:24] = flags[16:28]
+            rs_flags[24:28] = flags[12:16]
+            # print(f"rs_block: {rs_block}")
+            # print(f"rs_flags: {rs_flags}")
+
+            erase_pos = np.where(rs_flags == 1)[0]
+            #print(f"erase_pos: {erase_pos}")
+            f = len(erase_pos)
+
             try:
-                decoded, ecc, errata_pos = self.rsc2.decode(input[i*28:(i+1)*28], erase_pos=erase_pos)
-                decoded_list = list(decoded)
-                # Take the last 24 symbols (original data + parity)
-                decoded_list = decoded_list[-24:]
-                
-                # Algorithm 1 - C2 Decoder: Count new errors (not already marked as erasures)
+                #print(f"block_before_decoding_C2 := {rs_block}")
+                decoded, _, errata_pos = self.rsc2.decode(rs_block, erase_pos=list(erase_pos))
+                #print("did we get here?")
+                decoded_list = list(decoded)[-24:]
+
+                # count new errors (not already erasures)
                 new_errors = np.sum(~np.isin(errata_pos, erase_pos))
-                
-                # Algorithm 1: if zero or one error, modify at most one symbol
+                #print(f"New errors: {new_errors}")
                 if new_errors <= 1:
+                    # accept
                     output[i*24:(i+1)*24] = decoded_list
                     erasure_flags_out[i*24:(i+1)*24] = 0
+
                 else:
-                    # More than one error detected
                     if f > 2:
-                        # Copy C2 erasure flags from C1 erasure flags
-                        # Mark only the positions that were previously marked as erasures
+                        # propagate erasures
                         output[i*24:(i+1)*24] = decoded_list
                         erasure_flags_out[i*24:(i+1)*24] = 0
-                        # Propagate only the erase_pos that fall within the data part (first 24 bytes)
+
                         erase_pos_data = erase_pos[erase_pos < 24]
-                        erasure_flags_out[i*24 + erase_pos_data] = 1
+                        erasure_flags_out[i*24 + erase_pos_data] = 1 
+
                     elif f == 2:
-                        # If f=2 and error correction successful, modify the symbols accordingly
-                        # (successful decode means we accept it)
+                        # accept if decoder succeeded
                         output[i*24:(i+1)*24] = decoded_list
                         erasure_flags_out[i*24:(i+1)*24] = 0
+
                     else:
-                        # f < 2 and more than 1 error: assign erasure flags to all symbols
-                        output[i*24:(i+1)*24] = input[i*28:(i+1)*28][:24]
+                        # reject
+                        output[i*24:(i+1)*24] = rs_block[:24]
                         erasure_flags_out[i*24:(i+1)*24] = 1
-            except:
-                output[i*24:(i+1)*24] = input[i*28:(i+1)*28][:24]
+
+            except Exception:
+                # total failure
+                #print("Decoder failure")
+                output[i*24:(i+1)*24] = rs_block[:24]
                 erasure_flags_out[i*24:(i+1)*24] = 1
 
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
@@ -544,11 +584,43 @@ class AudioCD:
         assert len(np.shape(input))==1 and type(input) is np.ndarray, 'input must be a 1D numpy array'
         assert len(np.shape(erasure_flags_in))==1 and type(erasure_flags_in) is np.ndarray, 'erasure_flags_in must be a 1D numpy array'
 
-        n_frames = int(n_frames)
-        output = np.concatenate((np.zeros(2*24, dtype=input.dtype), input))
-        erasure_flags_out = np.concatenate((np.zeros(2*24, dtype=int), erasure_flags_in))
-        n_frames += 2
+           
+        input = input.reshape(n_frames, 24)
+        erasure_flags_in = erasure_flags_in.reshape(n_frames, 24)
 
+        
+        perm = np.array([
+            0, 1, 8, 9,
+            16, 17, 2, 3,
+            10, 11, 18, 19,
+            4, 5, 12, 13,
+            20, 21, 6, 7,
+            14, 15, 22, 23
+        ])
+        inv_perm = np.argsort(perm) #undo permutation
+
+        deinterleaved = input[:, inv_perm]
+        flags_deint   = erasure_flags_in[:, inv_perm]
+
+        output_frames = np.zeros((n_frames + 2, 24), dtype='B')
+        erasure_flags_out = np.zeros((n_frames + 2, 24), dtype=int)
+
+        # columns not delayed in encoder are now delayed
+        delay_cols = np.array([4,5,6,7, 12,13,14,15, 20,21,22,23])
+        no_delay_cols = np.array([0,1,2,3, 8,9,10,11, 16,17,18,19])
+
+        # apply delays
+        output_frames[:n_frames, no_delay_cols] = deinterleaved[:, no_delay_cols]
+        output_frames[2:n_frames+2, delay_cols] = deinterleaved[:, delay_cols]
+
+        # propagate erasure flags identically
+        erasure_flags_out[:n_frames, no_delay_cols] = flags_deint[:, no_delay_cols]
+        erasure_flags_out[2:n_frames+2, delay_cols] = flags_deint[:, delay_cols]
+
+        output = output_frames[2:-2, :].reshape(-1) #chop edges off and reshape
+        erasure_flags_out = erasure_flags_out[2:-2, :].reshape(-1) #chop edges off and reshape
+     
+        n_frames -= 2
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         assert len(np.shape(erasure_flags_out))==1 and type(erasure_flags_out) is np.ndarray, 'erasure_flags_out must be a 1D numpy array'
         return (output,erasure_flags_out,n_frames)
@@ -647,6 +719,89 @@ class AudioCD:
         assert len(np.shape(output))==1 and type(output) is np.ndarray, 'output must be a 1D numpy array'
         assert len(np.shape(interpolation_failed))==1 and type(interpolation_failed) is np.ndarray, 'interpolation_failed must be a 1D numpy array'
         return (output, interpolation_failed)
+    
+    def test_circ_pipeline(self):
+        print("========== TEST PIPELINE START ==========\n")
+        np.set_printoptions(threshold=2000, linewidth=300)
+        # --- SIMPLE INPUT (1 frame = 24 bytes) ---
+        n_frames = 1
+        input_data = np.arange(24, dtype='B')  # easy to track
+
+        print("INPUT (flat):")
+        print(input_data)
+        print("INPUT (frame):")
+        print(input_data.reshape(n_frames, 24))
+        print("\n")
+
+        # ================= ENCODER =================
+
+        # 1. Delay + Interleave
+        out, n_frames = self.CIRC_enc_delay_interleave(input_data, n_frames)
+        print("AFTER enc_delay_interleave:")
+        print(out.reshape(n_frames, 24))
+        print("\n")
+
+        # 2. C2 encoding
+        out, n_frames = self.CIRC_enc_C2(out, n_frames)
+        print("AFTER enc_C2:")
+        print(out.reshape(n_frames, 28))
+        print("\n")
+
+        # 3. Unequal delay
+        out, n_frames = self.CIRC_enc_delay_unequal(out, n_frames)
+        print("AFTER enc_delay_unequal:")
+        print(out.reshape(n_frames, 28))
+        print("\n")
+
+        # 4. C1 encoding
+        out, n_frames = self.CIRC_enc_C1(out, n_frames)
+        print("AFTER enc_C1:")
+        print(out.reshape(n_frames, 32))
+        print("\n")
+
+        # 5. Delay + inversion
+        out, n_frames = self.CIRC_enc_delay_inv(out, n_frames)
+        print("AFTER enc_delay_inv:")
+        print(out.reshape(n_frames, 32))
+        print("\n")
+
+        # ================= DECODER =================
+
+        # 6. Delay + inversion (decoder)
+        out, n_frames = self.CIRC_dec_delay_inv(out, n_frames)
+        print("AFTER dec_delay_inv:")
+        print(out.reshape(n_frames, 32))
+        print("\n")
+
+        # 7. C1 decode
+        out, flags, n_frames = self.CIRC_dec_C1(out, n_frames)
+        print("AFTER dec_C1:")
+        print(out.reshape(n_frames, 28))
+        print("FLAGS:")
+        print(flags.reshape(n_frames, 28))
+        print("\n")
+
+        # 8. Unequal delay decode
+        out, flags, n_frames = self.CIRC_dec_delay_unequal(out, flags, n_frames)
+        print("AFTER dec_delay_unequal:")
+        print(out.reshape(n_frames, 28))
+        print("\n")
+
+        # 9. C2 decode
+        out, flags, n_frames = self.CIRC_dec_C2(out, flags, n_frames)
+        print("AFTER dec_C2:")
+        print(out.reshape(n_frames, 24))
+        print("FLAGS:")
+        print(flags.reshape(n_frames, 24))
+        print("\n")
+
+        # 10. Deinterleave + delay
+        out, flags, n_frames = self.CIRC_dec_deinterleave_delay(out, flags, n_frames)
+        print("AFTER dec_deinterleave_delay:")
+        print(out.reshape(n_frames, 24))
+        print("\n")
+
+        print("========== TEST PIPELINE END ==========")
 
     @staticmethod
     def uencode(xscaled):
@@ -698,9 +853,9 @@ class AudioCD:
         #cd = AudioCD(Fs,0,8) # 0 for no CIRC, 1 for CIRC as described in standard, 2 for concatenated RS, no interleaving, 3 for single 32,24 RS
         cd.writeCd(audiofile)
         T_scratch = 600000 # Scratch at a diameter of approx. 66 mm
-        l_scratch = 3000
-        #for i  in range(math.floor((cd.cd_bits).size/T_scratch)):
-            #cd.scratchCd(l_scratch,30000+(i)*T_scratch)
+        l_scratch = 4096
+        for i  in range(math.floor((cd.cd_bits).size/T_scratch)):
+            cd.scratchCd(l_scratch,30000+(i)*T_scratch)
 
         [out,interpolation_flags] = cd.readCd()
         cd.save_and_play_music(out[:,0],out[:,1],'test.wav',0)
@@ -713,6 +868,7 @@ class AudioCD:
         print(f'Number undetected errors: {np.sum(out[interpolation_flags==0] != cd.scaled_quantized_padded_original[interpolation_flags==0])}')
 
         pass
+
 
 
 
@@ -738,32 +894,62 @@ class AudioCD:
 # print("Number of mismatches:", len(diff))
 
 
-import numpy as np
+# import numpy as np
 
-def print_frames(arr, n_frames, title):
-    print(f"\n--- {title} ---")
-    frames = arr.reshape(n_frames, 32)
-    for i, f in enumerate(frames):
-        print(f"Frame {i}: {f}")
+# def print_frames(arr, n_frames, title):
+#     print(f"\n--- {title} ---")
+#     frames = arr.reshape(n_frames, 32)
+#     for i, f in enumerate(frames):
+#         print(f"Frame {i}: {f}")
 
-# Simple test input: values = column index
-n_frames = 2
-input_frames = np.tile(np.arange(32, dtype='B'), (n_frames, 1))
+# # Simple test input: values = column index
+# n_frames = 2
+# input_frames = np.tile(np.arange(32, dtype='B'), (n_frames, 1))
 
-# Make rows slightly different so we can track time shifts
-input_frames[1] += 100
+# # Make rows slightly different so we can track time shifts
+# input_frames[1] += 100
 
-input_flat = input_frames.reshape(-1)
+# input_flat = input_frames.reshape(-1)
 
-print_frames(input_flat, n_frames, "INPUT")
+# print_frames(input_flat, n_frames, "INPUT")
 
-# Instantiate your class (replace with your actual class name)
+# # Instantiate your class (replace with your actual class name)
 circ = AudioCD(None, 1, 8)  # Assuming constructor takes (Fs, configuration, max_interpolation)
 
-# --- ENCODE ---
-enc_out, enc_nf = circ.CIRC_enc_delay_inv(input_flat.copy(), n_frames)
-print_frames(enc_out, enc_nf, "AFTER ENCODER")
+# # --- ENCODE ---
+# enc_out, enc_nf = circ.CIRC_enc_delay_inv(input_flat.copy(), n_frames)
+# print_frames(enc_out, enc_nf, "AFTER ENCODER")
 
-# --- DECODE ---
-dec_out, dec_nf = circ.CIRC_dec_delay_inv(enc_out.copy(), enc_nf)
-print_frames(dec_out, dec_nf, "AFTER DECODER")
+# # --- DECODE ---
+# dec_out, dec_nf = circ.CIRC_dec_delay_inv(enc_out.copy(), enc_nf)
+# print_frames(dec_out, dec_nf, "AFTER DECODER")
+# block = np.array([1, 2, 3, 4], dtype='B')  # Example block of 32 bytes
+# print("Original block:", block)
+# block = circ.rsc1.encode(block)
+# temp = block[-1]
+# block[-1] = block[2]
+# block[2] = temp
+# print("Encoded block:", block)
+# temp = block[-1]
+# block[-1] = block[2]
+# block[2] = temp
+# block = circ.rsc1.decode(block, erase_pos=None)
+# print("Decoded block:", block)
+
+
+# perm = np.array([
+#     0, 1, 8, 9,
+#     16, 17, 2, 3,
+#     10, 11, 18, 19,
+#     4, 5, 12, 13,
+#     20, 21, 6, 7,
+#     14, 15, 22, 23
+# ])
+# inv_perm = np.argsort(perm)
+
+# print("Permutation:", perm)
+# print("Inverse permutation:", inv_perm)
+
+
+
+#circ.test_circ_pipeline()
