@@ -124,7 +124,8 @@ class AudioCD:
         #  -p: the bit error probability, i.e., a self.cd_bits bit is flipped with probability p
         
         
-        noise = np.random.rand((self.cd_bits).shape)<p
+        #noise = np.random.rand((self.cd_bits).shape)<p was broken
+        noise = np.random.random(self.cd_bits.shape) < p
         self.cd_bits = np.bitwise_xor(self.cd_bits,noise.astype(int))
         # noise = np.random.rand(self.cd_bits.size) < p
         # self.cd_bits = np.bitwise_xor(self.cd_bits, noise.astype(int))
@@ -853,7 +854,7 @@ class AudioCD:
         #cd = AudioCD(Fs,0,8) # 0 for no CIRC, 1 for CIRC as described in standard, 2 for concatenated RS, no interleaving, 3 for single 32,24 RS
         cd.writeCd(audiofile)
         T_scratch = 600000 # Scratch at a diameter of approx. 66 mm
-        l_scratch = 4096
+        l_scratch = 10000
         for i  in range(math.floor((cd.cd_bits).size/T_scratch)):
             cd.scratchCd(l_scratch,30000+(i)*T_scratch)
 
@@ -915,7 +916,7 @@ class AudioCD:
 
 # # Instantiate your class (replace with your actual class name)
 circ = AudioCD(None, 1, 8)  # Assuming constructor takes (Fs, configuration, max_interpolation)
-
+AudioCD.test()
 # # --- ENCODE ---
 # enc_out, enc_nf = circ.CIRC_enc_delay_inv(input_flat.copy(), n_frames)
 # print_frames(enc_out, enc_nf, "AFTER ENCODER")
