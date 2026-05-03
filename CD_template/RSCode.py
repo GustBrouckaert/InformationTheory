@@ -90,6 +90,7 @@ class RSCode:
             return y
 
         def compute_syndromes(r_full):
+            # Compute syndrome values S_j = r(alpha^(m0+j)); all-zero means no detectable errors.
             synd = GF.Zeros(n_sym)
             for j in range(n_sym):
                 root = alpha ** (self.m0 + j)
@@ -100,6 +101,7 @@ class RSCode:
             return synd
 
         def berlekamp_massey(synd):
+            # Berlekamp-Massey: find error-locator polynomial Lambda and its degree L.
             C = GF.Zeros(n_sym + 1)
             B = GF.Zeros(n_sym + 1)
             C[0] = GF(1)
@@ -139,6 +141,7 @@ class RSCode:
 
         for r in range(n_rows):
             r_short = GF(code[r, :])
+            # Reconstruct the full-length codeword by restoring leading shortened symbols as zeros.
             r_full = np.concatenate((GF.Zeros(n_pad), r_short))
 
             synd = compute_syndromes(r_full)
@@ -165,7 +168,7 @@ class RSCode:
                 nERR[r] = -1
                 continue
 
-            # Error evaluator Omega(x) = (S(x) * Lambda(x)) mod x^(n-k)
+            # Error evaluator Omega(x) = (S(x) * Lambda(x)) mod x^(n-k).
             omega = GF.Zeros(n_sym)
             for i in range(n_sym):
                 for j in range(min(i, L) + 1):
@@ -190,7 +193,7 @@ class RSCode:
                     decode_failed = True
                     break
 
-                # Forney for consecutive roots alpha^m0 .. alpha^(m0+n-k-1)
+                # Forney formula gives the error magnitude at this location.
                 err = (Xi ** (1 - self.m0)) * num / den
                 # Descending convention: position x^i maps to r_full index (self.n - 1 - i).
                 arr_idx = self.n - 1 - i
